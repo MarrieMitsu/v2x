@@ -2,7 +2,10 @@
 name = "v2x"
 description = "v2x is a command-line tool that converts vector graphic images (SVG) into multiple output formats, primarily raster-based formats such as JPG, PNG, TIFF, WebP, and AVIF"
 version = "0.1.0"
+authors = ["MarrieMitsu"]
 edition = "2024"
+readme = "./README.md"
+repository = "https://github.com/MarrieMitsu/v2x"
 
 [dependencies]
 anyhow = "1.0.100"
