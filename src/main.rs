@@ -1,8 +1,11 @@
 use std::collections::HashSet;
+use std::ffi::OsString;
+use std::io::Read;
 use std::path::PathBuf;
 
-use anyhow::{Result, bail};
-use clap::{Parser, ValueEnum};
+use anyhow::{Context, Result, bail};
+use clap::builder::TypedValueParser;
+use clap::{Parser, ValueEnum, ValueHint};
 use image::ExtendedColorType;
 use rayon::prelude::*;
 use tiny_skia::Pixmap;
@@ -36,16 +39,50 @@ impl Format {
     }
 }
 
+/// An input that is either stdin or a real path.
+#[derive(Debug, Clone)]
+enum Input {
+    /// Stdin, represented by `-`.
+    Stdin,
+    /// A non-empty path.
+    Path(PathBuf),
+}
+
+fn input_value_parser() -> impl TypedValueParser<Value = Input> {
+    clap::builder::OsStringValueParser::new().try_map(|v| {
+        if v.is_empty() {
+            Err(clap::Error::new(clap::error::ErrorKind::InvalidValue))
+        } else if v == "-" {
+            Ok(Input::Stdin)
+        } else {
+            Ok(Input::Path(v.into()))
+        }
+    })
+}
+
+fn read_from_stdin() -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    std::io::stdin().read_to_end(&mut buf)?;
+
+    Ok(buf)
+}
+
 /// Config
 #[derive(Clone, Debug, Parser)]
 #[command(version, about, long_about = None)]
 struct Config {
-    /// Input file (svg).
-    input: PathBuf,
+    /// Path to input SVG file. Use `-` to read input from stdin.
+    #[clap(value_parser = input_value_parser(), value_hint = ValueHint::FilePath)]
+    input: Input,
 
     /// Output directory. If not specified it will use current working directory.
     #[arg(short, long)]
     output: Option<PathBuf>,
+
+    /// Custom output filename without an extension. When input is from 'stdin', this option is
+    /// required.
+    #[arg(long)]
+    filename: Option<String>,
 
     /// Explicitly specify a list of formats, separated by <commas>. By default, all available
     /// formats are generated.
@@ -180,17 +217,38 @@ fn main() -> Result<()> {
         None
     };
 
-    if !is_svg_file(&config.input) {
-        bail!(
-            "Invalid SVG file: '{}'. Please provide a valid SVG input.",
-            config.input.display()
-        );
-    }
+    let filename = match &config.input {
+        Input::Stdin => match config.filename {
+            Some(f) => OsString::from(f),
+            _ => bail!("'--filename' is required because the input comes from stdin."),
+        },
+        Input::Path(p) => {
+            if !is_svg_file(&p) {
+                bail!(
+                    "Invalid SVG file: '{}'. Please provide a valid SVG input.",
+                    p.display()
+                );
+            }
+
+            match config.filename {
+                Some(f) => OsString::from(f),
+                _ => p
+                    .file_stem()
+                    .expect("filename should not be empty.")
+                    .to_owned(),
+            }
+        }
+    };
 
     let mut opt = usvg::Options::default();
     opt.fontdb_mut().load_system_fonts();
 
-    let data = std::fs::read(&config.input)?;
+    let data = match &config.input {
+        Input::Stdin => read_from_stdin().context("Failed to read from stdin.")?,
+        Input::Path(p) => {
+            std::fs::read(&p).with_context(|| format!("Failed to read file '{}'.", p.display()))?
+        }
+    };
     let tree = usvg::Tree::from_data(&data, &opt)?;
 
     let size = tree.size().to_int_size();
@@ -237,24 +295,19 @@ fn main() -> Result<()> {
 
     formats.par_iter().for_each(|f| {
         let id =
-            rayon::current_thread_index().expect("should be called from a Rayon worker thread");
+            rayon::current_thread_index().expect("should be called from a Rayon worker thread.");
         let start = std::time::Instant::now();
 
         let o = {
             let ext = f.extension();
             let mut o = PathBuf::from(&output);
-            o.push(
-                &config
-                    .input
-                    .file_stem()
-                    .expect("filename should not be empty"),
-            );
+            o.push(&filename);
             o.set_extension(ext);
             o
         };
 
         let transform = tiny_skia::Transform::from_scale(scale_x, scale_y);
-        let mut pixmap = tiny_skia::Pixmap::new(width, height).expect("size should not be zero");
+        let mut pixmap = tiny_skia::Pixmap::new(width, height).expect("size should not be zero.");
 
         let bg_color = if let Some(v) = background {
             v
@@ -281,7 +334,7 @@ fn main() -> Result<()> {
                 "[thread_id={}] Failed to generate '{}' Caused by: {}",
                 id,
                 o.file_name()
-                    .expect("path should not be terminates in `..`")
+                    .expect("path should not be terminates in `..`.")
                     .display(),
                 e
             );
@@ -299,7 +352,7 @@ fn main() -> Result<()> {
                 "[thread_id={}] Generated: '{}' in {}",
                 id,
                 o.file_name()
-                    .expect("path should not be terminates in `..`")
+                    .expect("path should not be terminates in `..`.")
                     .display(),
                 elapsed,
             );
