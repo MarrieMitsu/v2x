@@ -294,8 +294,7 @@ fn main() -> Result<()> {
     log::info!("Detected {} CPU cores for parallelization.", cores);
 
     formats.par_iter().for_each(|f| {
-        let id =
-            rayon::current_thread_index().expect("should be called from a Rayon worker thread.");
+        let id = rayon::current_thread_index().unwrap_or(0);
         let start = std::time::Instant::now();
 
         let o = {
